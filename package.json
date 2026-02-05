@@ -1,0 +1,35 @@
+{
+  "name": "after-effects-mcp",
+  "version": "2.0.0",
+  "description": "Complete MCP server for Adobe After Effects - 122 tools for full video production",
+  "main": "build/index.js",
+  "type": "module",
+  "scripts": {
+    "build": "tsc && cp -r ./src/scripts ./build/",
+    "build:win": "tsc && xcopy .\\src\\scripts .\\build\\scripts /E /I /Y",
+    "start": "node build/index.js",
+    "dev": "npm run build && npm start",
+    "install-bridge": "node install-bridge.js",
+    "setup": "npm install && npm run build && npm run install-bridge",
+    "postinstall": "npm run build"
+  },
+  "keywords": [
+    "after-effects",
+    "mcp",
+    "model-context-protocol",
+    "adobe",
+    "motion-graphics",
+    "video-production",
+    "ai-automation"
+  ],
+  "dependencies": {
+    "@modelcontextprotocol/sdk": "^1.0.0",
+    "node-fetch": "^3.3.2",
+    "sharp": "^0.34.5",
+    "zod": "^3.22.2"
+  },
+  "devDependencies": {
+    "@types/node": "^20.17.30",
+    "typescript": "^5.2.2"
+  }
+}
