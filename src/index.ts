@@ -2073,21 +2073,29 @@ server.tool(
 // Export Frame
 server.tool(
   "export-frame",
-  "Export a single frame from the composition",
+  "Export a single frame from the composition at full resolution",
   {
-    compIndex: z.number().int().positive().describe("1-based composition index"),
-    time: z.number().describe("Time in seconds to export"),
-    format: z.enum(["png", "jpg", "tiff", "psd", "exr"]).describe("Output format"),
-    outputPath: z.string().describe("Output file path"),
+    compIndex: z.number().int().positive().optional().describe("1-based composition index (omit to use active comp)"),
+    compName: z.string().optional().describe("Composition name (omit to use active comp)"),
+    time: z.number().optional().describe("Time in seconds to export (default: current time)"),
+    format: z.enum(["png", "jpg", "tiff", "psd", "exr"]).optional().default("png").describe("Output format"),
+    outputPath: z.string().optional().describe("Output file path (default: auto-generated)"),
     quality: z.number().min(0).max(100).optional().describe("Quality for JPEG (0-100)")
   },
   async (params) => {
     try {
-      writeCommandFile("exportFrame", params);
+      // Generate default output path if not provided
+      const finalParams = {
+        ...params,
+        outputPath: params.outputPath || path.join(getBridgeDir(), `ae_frame_export.${params.format || 'png'}`),
+        time: params.time ?? 0,
+        format: params.format || 'png'
+      };
+      writeCommandFile("exportFrame", finalParams);
       return {
         content: [{
           type: "text",
-          text: `Command to export frame at ${params.time}s as ${params.format} has been queued.`
+          text: `Command to export frame at ${finalParams.time}s as ${finalParams.format} has been queued. Output: ${finalParams.outputPath}`
         }]
       };
     } catch (error) {
@@ -2099,7 +2107,7 @@ server.tool(
 // Get viewport screenshot (vision of scene – like Blender MCP get_viewport_screenshot)
 server.tool(
   "get-viewport-screenshot",
-  "Capture the current composition view as an image so the AI can 'see' the scene. Uses active composition by default, or specify compIndex/compName and optional time. Returns a PNG image.",
+  "Capture the current composition view. Uses active composition by default, or specify compIndex/compName and optional time.",
   {
     compIndex: z.number().int().positive().optional().describe("1-based composition index (omit to use active comp)"),
     compName: z.string().optional().describe("Composition name (omit to use active comp)"),
@@ -2108,171 +2116,113 @@ server.tool(
   async (params) => {
     try {
       const bridgeDir = getBridgeDir();
-      const outputPath = path.join(bridgeDir, "ae_viewport.png");
-      
-      // Log for debugging (stderr goes to MCP client logs)
-      console.error(`[get-viewport-screenshot] Bridge dir: ${bridgeDir}`);
-      console.error(`[get-viewport-screenshot] Output path: ${outputPath}`);
-      
-      // Delete existing file first to ensure we get a fresh capture
+      const pngPath = path.join(bridgeDir, "ae_viewport.png");
+      const jpgPath = path.join(bridgeDir, "ae_viewport.jpg");
+
+      // Clean up existing files
       try {
-        if (fs.existsSync(outputPath)) {
-          fs.unlinkSync(outputPath);
-          console.error(`[get-viewport-screenshot] Deleted existing file`);
+        const files = ["ae_viewport.png", "ae_viewport.jpg", "ae_viewport.tif", "ae_viewport.psd"];
+        for (const f of files) {
+          const p = path.join(bridgeDir, f);
+          if (fs.existsSync(p)) fs.unlinkSync(p);
         }
       } catch (e) {
-        console.error(`[get-viewport-screenshot] Could not delete existing file: ${e}`);
+        console.error(`[get-viewport-screenshot] Cleanup error: ${e}`);
       }
-      
+
       clearResultsFile();
       writeCommandFile("captureViewport", {
-        outputPath,
         compIndex: params.compIndex,
         compName: params.compName,
         time: params.time
       });
-      
-      // Longer timeout for slow systems
+
       const resultStr = await waitForBridgeResult("captureViewport", 20000, 300);
-      let result: { status?: string; message?: string; outputPath?: string; compName?: string; time?: number };
+      let result: { status?: string; message?: string; outputPath?: string; compName?: string; time?: number; resolution?: number[] };
       try {
         result = JSON.parse(resultStr);
       } catch {
         return {
-          content: [{ type: "text", text: `Bridge did not return valid JSON. Raw: ${resultStr.slice(0, 500)}\n\nNode bridge dir: ${bridgeDir}\nMake sure After Effects bridge panel shows the same path.` }],
+          content: [{ type: "text", text: `Bridge did not return valid JSON. Raw: ${resultStr.slice(0, 500)}` }],
           isError: true
         };
       }
+
       if (result.status !== "success") {
-        // Add path info to error for debugging
-        const pathInfo = `\n\nNode expects file at: ${outputPath}\nBridge reported path: ${result.outputPath || "(not reported)"}\nBridge dir: ${bridgeDir}`;
         return {
-          content: [{ type: "text", text: (result.message || "Capture failed.") + pathInfo }],
+          content: [{ type: "text", text: result.message || "Capture failed." }],
           isError: true
         };
       }
-      const imagePath = result.outputPath || outputPath;
-      console.error(`[get-viewport-screenshot] Bridge reported success, checking file at: ${imagePath}`);
-      
-      // Wait for file to exist and have content with multiple retries
+
+      const imagePath = result.outputPath || pngPath;
+
+      // Wait for file
       let imageBuffer: Buffer | null = null;
-      const maxRetries = 5;
-      const retryDelays = [100, 200, 500, 1000, 2000]; // Exponential backoff
-      
-      for (let attempt = 0; attempt < maxRetries; attempt++) {
-        if (!fs.existsSync(imagePath)) {
-          if (attempt < maxRetries - 1) {
-            await new Promise((resolve) => setTimeout(resolve, retryDelays[attempt]));
-            continue;
+      for (let attempt = 0; attempt < 10; attempt++) {
+        if (fs.existsSync(imagePath)) {
+          const buffer = fs.readFileSync(imagePath);
+          if (buffer.length > 0) {
+            imageBuffer = buffer;
+            break;
           }
-          return {
-            content: [{ type: "text", text: `Image file not found at ${imagePath} after ${maxRetries} attempts. Bridge may use a different path.` }],
-            isError: true
-          };
         }
-        
-        const buffer = fs.readFileSync(imagePath);
-        if (buffer.length > 0) {
-          imageBuffer = buffer;
-          break;
-        }
-        
-        // File exists but is empty, wait and retry
-        if (attempt < maxRetries - 1) {
-          await new Promise((resolve) => setTimeout(resolve, retryDelays[attempt]));
-        }
+        await new Promise((resolve) => setTimeout(resolve, 200));
       }
-      
-      const compInfo = result.compName != null ? ` (${result.compName} at ${result.time ?? "current"}s)` : "";
-      
-      // Final check: if we still don't have valid image data, return error without image block
+
+      const compInfo = result.compName ? ` (${result.compName} at ${result.time ?? 0}s)` : "";
+      const resInfo = result.resolution ? ` [${result.resolution[0]}x${result.resolution[1]}]` : "";
+
       if (!imageBuffer || imageBuffer.length === 0) {
         return {
-          content: [{
-            type: "text",
-            text: `Viewport capture reported success${compInfo}, but the image file was empty after ${maxRetries} retries (${imagePath}). This can happen if:\n- The composition has no visible content\n- After Effects didn't finish writing the file\n- saveFrameToPng failed silently\n\nTry again or check that the composition has visible layers.`
-          }],
+          content: [{ type: "text", text: `Capture reported success but file not found at ${imagePath}` }],
           isError: true
         };
       }
-      
-      // Re-encode PNG so the API can process it. AE outputs 16-bit PNGs that many libraries can't read.
-      // Force conversion to 8-bit depth and JPEG for maximum compatibility.
-      let processedBuffer: Buffer;
+
+      // Check if there's an existing JPG file (converted externally)
+      if (fs.existsSync(jpgPath)) {
+        const stats = fs.statSync(jpgPath);
+        if (stats.size > 0) {
+          const jpegBuffer = fs.readFileSync(jpgPath);
+          const base64Jpeg = jpegBuffer.toString("base64");
+          return {
+            content: [
+              { type: "text", text: `Viewport captured${compInfo}${resInfo}.` },
+              { type: "image", data: base64Jpeg, mimeType: "image/jpeg" as const }
+            ]
+          };
+        }
+      }
+
+      // Try macOS sips to convert 16-bit PNG to JPEG
       try {
-        // Use sharp with explicit 8-bit conversion - handles 16-bit input
-        processedBuffer = await sharp(imageBuffer, { failOn: 'none' })
-          .toColorspace('srgb')
-          .jpeg({ quality: 85 })
-          .toBuffer();
+        const { execSync } = await import("child_process");
+        execSync(`sips -s format jpeg -s formatOptions 90 "${imagePath}" --out "${jpgPath}"`, { timeout: 15000 });
 
-        const base64Jpeg = processedBuffer.toString("base64");
-        return {
-          content: [
-            { type: "text", text: `Viewport captured${compInfo}.` },
-            { type: "image", data: base64Jpeg, mimeType: "image/jpeg" as const }
-          ]
-        };
-      } catch (sharpErr) {
-        // Sharp failed - try using ImageMagick via command line as fallback
-        try {
-          const { execSync } = await import("child_process");
-          const jpegPath = imagePath.replace('.png', '_converted.jpg');
-          execSync(`convert "${imagePath}" -depth 8 "${jpegPath}"`, { timeout: 10000 });
-
-          if (fs.existsSync(jpegPath)) {
-            const jpegBuffer = fs.readFileSync(jpegPath);
-            fs.unlinkSync(jpegPath); // Clean up temp file
+        if (fs.existsSync(jpgPath)) {
+          const stats = fs.statSync(jpgPath);
+          if (stats.size > 0) {
+            const jpegBuffer = fs.readFileSync(jpgPath);
             const base64Jpeg = jpegBuffer.toString("base64");
             return {
               content: [
-                { type: "text", text: `Viewport captured${compInfo}. (Converted via ImageMagick)` },
+                { type: "text", text: `Viewport captured${compInfo}${resInfo}.` },
                 { type: "image", data: base64Jpeg, mimeType: "image/jpeg" as const }
               ]
             };
           }
-        } catch (imErr) {
-          // ImageMagick not available or failed
-          console.error(`ImageMagick fallback failed: ${imErr}`);
         }
+      } catch (sipsErr) {
+        console.error(`[get-viewport-screenshot] sips failed: ${sipsErr}`);
+      }
 
-        // Final fallback: return the raw PNG and hope for the best
-        try {
-          const base64Png = imageBuffer.toString("base64");
-          return {
-            content: [
-              { type: "text", text: `Viewport captured${compInfo}. (Raw 16-bit PNG - may not display correctly)` },
-              { type: "image", data: base64Png, mimeType: "image/png" as const }
-            ]
-          };
-        } catch (rawErr) {
-          return {
-            content: [{
-              type: "text",
-              text: `Viewport capture${compInfo}: Image file exists (${imageBuffer.length} bytes) but could not be processed. Sharp error: ${sharpErr}. The image is a 16-bit PNG which requires conversion.`
-            }],
-            isError: true
-          };
-        }
-      }
-      
-      const base64 = processedBuffer.toString("base64");
-      
-      // Triple-check: ensure base64 string is not empty before returning image
-      if (!base64 || base64.length === 0) {
-        return {
-          content: [{
-            type: "text",
-            text: `Viewport capture${compInfo}: Image buffer had ${processedBuffer.length} bytes but base64 encoding failed. This is unexpected.`
-          }],
-          isError: true
-        };
-      }
-      
+      // Return PNG directly without conversion (16-bit PNG is fine)
+      const base64Png = imageBuffer.toString("base64");
       return {
         content: [
-          { type: "text", text: `Viewport captured${compInfo}. Use the image to see the current composition.` },
-          { type: "image", data: base64, mimeType: "image/png" as const }
+          { type: "text", text: `Viewport captured${compInfo}${resInfo}.` },
+          { type: "image", data: base64Png, mimeType: "image/png" as const }
         ]
       };
     } catch (error) {

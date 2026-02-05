@@ -2053,25 +2053,98 @@ function exportComposition(args) {
 
 function exportFrame(args) {
     try {
-        var comp = app.project.item(args.compIndex);
-        
-        // Set time
-        comp.time = args.time;
-        
-        // Save frame
-        var outputFile = new File(args.outputPath);
-        comp.saveFrameToPng(args.time, outputFile);
-        
+        var comp = null;
+
+        // Support both compIndex and compName
+        if (args.compIndex !== undefined) {
+            comp = app.project.item(args.compIndex);
+        } else if (args.compName) {
+            for (var i = 1; i <= app.project.numItems; i++) {
+                var item = app.project.item(i);
+                if (item instanceof CompItem && item.name === args.compName) {
+                    comp = item;
+                    break;
+                }
+            }
+        } else if (app.project.activeItem instanceof CompItem) {
+            comp = app.project.activeItem;
+        }
+
+        if (!(comp instanceof CompItem)) {
+            return JSON.stringify({ status: "error", message: "No valid composition found" }, null, 2);
+        }
+
+        var t = args.time !== undefined ? args.time : comp.time;
+        comp.time = t;
+
+        var outputPath = args.outputPath;
+        var format = (args.format || "png").toLowerCase();
+
+        // For PNG, use saveFrameToPng directly (fast, native)
+        if (format === "png") {
+            var outputFile = new File(outputPath);
+            if (outputFile.parent && !outputFile.parent.exists) {
+                outputFile.parent.create();
+            }
+            comp.saveFrameToPng(t, outputFile);
+            return JSON.stringify({
+                status: "success",
+                message: "Frame exported to " + outputPath,
+                resolution: [comp.width, comp.height],
+                time: t,
+                compName: comp.name,
+                format: "png"
+            }, null, 2);
+        }
+
+        // For other formats, use render queue
+        var rqi = app.project.renderQueue.items.add(comp);
+        var om = rqi.outputModules[1];
+
+        // Set render settings
+        try {
+            rqi.applyTemplate("Best Settings");
+        } catch (e) {}
+
+        // Single frame only
+        rqi.timeSpanStart = t;
+        rqi.timeSpanDuration = comp.frameDuration;
+
+        // Apply template based on format
+        var template = "Photoshop"; // Default
+        if (format === "tiff" || format === "tif") {
+            template = "TIFF Sequence with Alpha";
+        }
+        try {
+            om.applyTemplate(template);
+        } catch (e) {
+            logToPanel("Template " + template + " not available: " + e.toString());
+        }
+
+        // Set output file
+        var outputFile = new File(outputPath);
+        om.file = outputFile;
+
+        // Render
+        app.project.renderQueue.render();
+
+        // Clean up
+        rqi.remove();
+
         return JSON.stringify({
             status: "success",
-            message: "Frame exported to " + args.outputPath
+            message: "Frame exported to " + outputPath,
+            resolution: [comp.width, comp.height],
+            time: t,
+            compName: comp.name,
+            format: format
         }, null, 2);
     } catch (e) {
         return JSON.stringify({ status: "error", message: e.toString() }, null, 2);
     }
 }
 
-// Capture current composition view (viewport) to PNG for AI "vision" of scene (like Blender MCP get_viewport_screenshot)
+// Capture current composition view at full resolution using render queue
 function captureViewport(args) {
     try {
         var comp = null;
@@ -2100,40 +2173,104 @@ function captureViewport(args) {
         }
         var t = (args.time !== undefined && args.time !== null) ? args.time : comp.time;
         comp.time = t;
-        var outputPath = args.outputPath;
-        if (!outputPath) {
-            outputPath = getBridgeDir() + "/ae_viewport.png";
-        }
-        // Normalize path for ExtendScript File object
+
+        // Output paths
+        var bridgeDir = getBridgeDir();
+        var outputPath = bridgeDir + "/ae_viewport.png";
         outputPath = outputPath.replace(/\\/g, "/");
         var outputFile = new File(outputPath);
-        logToPanel("captureViewport: outputPath = " + outputPath);
-        logToPanel("captureViewport: outputFile.fsName = " + outputFile.fsName);
-        
+
         // Ensure parent directory exists
         if (outputFile.parent && !outputFile.parent.exists) {
             outputFile.parent.create();
         }
-        
-        // Try to capture - saveFrameToPng throws on failure, so trust it if no exception
-        try {
-            comp.saveFrameToPng(t, outputFile);
-            // Give filesystem time to flush
-            $.sleep(200);
-        } catch (saveErr) {
-            return JSON.stringify({
-                status: "error",
-                message: "saveFrameToPng failed: " + saveErr.toString(),
-                outputPath: outputPath
-            }, null, 2);
+
+        // Delete existing file if present
+        if (outputFile.exists) {
+            outputFile.remove();
         }
-        
+
+        // Try render queue for full resolution capture
+        var usedRenderQueue = false;
+        try {
+            // Store current work area
+            var origWorkStart = comp.workAreaStart;
+            var origWorkDur = comp.workAreaDuration;
+
+            // Calculate frame duration
+            var frameDur = 1 / comp.frameRate;
+
+            // Set work area to single frame
+            comp.workAreaStart = t;
+            comp.workAreaDuration = frameDur;
+
+            // Add to render queue
+            var rqItem = app.project.renderQueue.items.add(comp);
+            var om = rqItem.outputModule(1);
+
+            // Set output file (as sequence so we get [00000] suffix)
+            var seqPath = bridgeDir + "/ae_viewport_[#####].png";
+            om.file = new File(seqPath);
+
+            // Try PNG template
+            var templates = om.templates;
+            for (var ti = 0; ti < templates.length; ti++) {
+                var tmpl = templates[ti];
+                if (tmpl.indexOf("PNG") >= 0) {
+                    try {
+                        om.applyTemplate(tmpl);
+                        break;
+                    } catch (e) {}
+                }
+            }
+
+            // Set output file again
+            om.file = new File(seqPath);
+
+            // Render settings - current settings with work area
+            rqItem.timeSpanStart = t;
+            rqItem.timeSpanDuration = frameDur;
+
+            // Render synchronously
+            app.project.renderQueue.render();
+
+            // Restore work area
+            comp.workAreaStart = origWorkStart;
+            comp.workAreaDuration = origWorkDur;
+
+            // Remove render queue item
+            rqItem.remove();
+
+            // Find the rendered frame (will have frame number in name)
+            var frameNum = Math.round(t * comp.frameRate);
+            var frameStr = ("00000" + frameNum).slice(-5);
+            var renderedPath = bridgeDir + "/ae_viewport_" + frameStr + ".png";
+            var renderedFile = new File(renderedPath);
+
+            if (renderedFile.exists) {
+                // Rename to expected output path
+                renderedFile.rename("ae_viewport.png");
+                usedRenderQueue = true;
+            }
+        } catch (rqErr) {
+            // Render queue failed - fall back to saveFrameToPng
+        }
+
+        // Check if render queue produced output
+        if (!outputFile.exists) {
+            // Fallback to saveFrameToPng (captures at viewer resolution)
+            comp.saveFrameToPng(t, outputFile);
+            $.sleep(100);
+        }
+
         return JSON.stringify({
             status: "success",
-            message: "Viewport captured",
+            message: usedRenderQueue ? "Viewport captured (full resolution)" : "Viewport captured (viewer resolution)",
             outputPath: outputPath,
             compName: comp.name,
-            time: t
+            time: t,
+            resolution: [comp.width, comp.height],
+            format: "png"
         }, null, 2);
     } catch (e) {
         return JSON.stringify({ status: "error", message: e.toString() }, null, 2);
