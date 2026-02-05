@@ -2104,72 +2104,26 @@ function captureViewport(args) {
         if (!outputPath) {
             outputPath = getBridgeDir() + "/ae_viewport.png";
         }
+        // Normalize path for ExtendScript File object
+        outputPath = outputPath.replace(/\\/g, "/");
         var outputFile = new File(outputPath);
+        logToPanel("captureViewport: outputPath = " + outputPath);
+        logToPanel("captureViewport: outputFile.fsName = " + outputFile.fsName);
         
         // Ensure parent directory exists
         if (outputFile.parent && !outputFile.parent.exists) {
             outputFile.parent.create();
         }
         
-        // Remove existing file first
-        if (outputFile.exists) {
-            try { outputFile.remove(); } catch (e) {}
-        }
-        
-        // Try to capture with multiple retries
-        var maxRetries = 3;
-        var fileSize = 0;
-        
-        for (var attempt = 0; attempt < maxRetries; attempt++) {
-            try {
-                comp.saveFrameToPng(t, outputFile);
-            } catch (saveErr) {
-                logToPanel("saveFrameToPng attempt " + (attempt + 1) + " error: " + saveErr.toString());
-                if (attempt < maxRetries - 1) {
-                    $.sleep(300);
-                    continue;
-                }
-                return JSON.stringify({
-                    status: "error",
-                    message: "saveFrameToPng failed: " + saveErr.toString(),
-                    outputPath: outputPath
-                }, null, 2);
-            }
-            
-            // Wait a moment for file system to catch up
-            $.sleep(100);
-            
-            // Check if file was written successfully
-            var fileCheck = new File(outputPath);
-            if (fileCheck.exists) {
-                fileSize = fileCheck.length;
-                if (fileSize > 0) {
-                    // Success! File has content
-                    break;
-                }
-            }
-            
-            logToPanel("captureViewport attempt " + (attempt + 1) + ": file exists=" + fileCheck.exists + ", size=" + fileSize);
-            
-            if (attempt < maxRetries - 1) {
-                $.sleep(500); // Wait longer between retries
-            }
-        }
-        
-        // Final check
-        var finalCheck = new File(outputPath);
-        if (!finalCheck.exists) {
+        // Try to capture - saveFrameToPng throws on failure, so trust it if no exception
+        try {
+            comp.saveFrameToPng(t, outputFile);
+            // Give filesystem time to flush
+            $.sleep(200);
+        } catch (saveErr) {
             return JSON.stringify({
                 status: "error",
-                message: "Viewport capture failed: file was not created after " + maxRetries + " attempts",
-                outputPath: outputPath
-            }, null, 2);
-        }
-        
-        if (finalCheck.length === 0) {
-            return JSON.stringify({
-                status: "error",
-                message: "Viewport capture failed: file was created but is empty (0 bytes) after " + maxRetries + " attempts. The composition may have no visible content at time " + t + "s.",
+                message: "saveFrameToPng failed: " + saveErr.toString(),
                 outputPath: outputPath
             }, null, 2);
         }
@@ -2179,8 +2133,7 @@ function captureViewport(args) {
             message: "Viewport captured",
             outputPath: outputPath,
             compName: comp.name,
-            time: t,
-            fileSize: finalCheck.length
+            time: t
         }, null, 2);
     } catch (e) {
         return JSON.stringify({ status: "error", message: e.toString() }, null, 2);

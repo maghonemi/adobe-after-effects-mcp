@@ -2196,46 +2196,63 @@ server.tool(
         };
       }
       
-      // Re-encode PNG so the API can process it. AE sometimes writes PNGs that libspng (sharp) can't read.
+      // Re-encode PNG so the API can process it. AE outputs 16-bit PNGs that many libraries can't read.
+      // Force conversion to 8-bit depth and JPEG for maximum compatibility.
       let processedBuffer: Buffer;
       try {
-        processedBuffer = await sharp(imageBuffer)
-          .png({ compressionLevel: 6 })
+        // Use sharp with explicit 8-bit conversion - handles 16-bit input
+        processedBuffer = await sharp(imageBuffer, { failOn: 'none' })
+          .toColorspace('srgb')
+          .jpeg({ quality: 85 })
           .toBuffer();
+
+        const base64Jpeg = processedBuffer.toString("base64");
+        return {
+          content: [
+            { type: "text", text: `Viewport captured${compInfo}.` },
+            { type: "image", data: base64Jpeg, mimeType: "image/jpeg" as const }
+          ]
+        };
       } catch (sharpErr) {
+        // Sharp failed - try using ImageMagick via command line as fallback
         try {
-          processedBuffer = await sharp(imageBuffer)
-            .jpeg({ quality: 90 })
-            .toBuffer();
-          const base64Jpeg = processedBuffer.toString("base64");
-          return {
-            content: [
-              { type: "text", text: `Viewport captured${compInfo}. (Converted to JPEG due to PNG issue)` },
-              { type: "image", data: base64Jpeg, mimeType: "image/jpeg" as const }
-            ]
-          };
-        } catch {
-          // Sharp failed (e.g. libspng read error). Try Jimp - different PNG decoder, often accepts AE output.
-          try {
-            const { Jimp } = await import("jimp");
-            const image = await Jimp.read(imagePath);
-            const jpegBuffer = await image.getBuffer("image/jpeg", { quality: 90 });
+          const { execSync } = await import("child_process");
+          const jpegPath = imagePath.replace('.png', '_converted.jpg');
+          execSync(`convert "${imagePath}" -depth 8 "${jpegPath}"`, { timeout: 10000 });
+
+          if (fs.existsSync(jpegPath)) {
+            const jpegBuffer = fs.readFileSync(jpegPath);
+            fs.unlinkSync(jpegPath); // Clean up temp file
             const base64Jpeg = jpegBuffer.toString("base64");
             return {
               content: [
-                { type: "text", text: `Viewport captured${compInfo}. (Decoded with Jimp fallback.)` },
+                { type: "text", text: `Viewport captured${compInfo}. (Converted via ImageMagick)` },
                 { type: "image", data: base64Jpeg, mimeType: "image/jpeg" as const }
               ]
             };
-          } catch (jimpErr) {
-            return {
-              content: [{
-                type: "text",
-                text: `Viewport capture${compInfo}: Image file exists (${imageBuffer.length} bytes) but could not be decoded. Sharp: ${sharpErr}. Jimp fallback: ${jimpErr}. AE may be writing a PNG variant that neither library supports.`
-              }],
-              isError: true
-            };
           }
+        } catch (imErr) {
+          // ImageMagick not available or failed
+          console.error(`ImageMagick fallback failed: ${imErr}`);
+        }
+
+        // Final fallback: return the raw PNG and hope for the best
+        try {
+          const base64Png = imageBuffer.toString("base64");
+          return {
+            content: [
+              { type: "text", text: `Viewport captured${compInfo}. (Raw 16-bit PNG - may not display correctly)` },
+              { type: "image", data: base64Png, mimeType: "image/png" as const }
+            ]
+          };
+        } catch (rawErr) {
+          return {
+            content: [{
+              type: "text",
+              text: `Viewport capture${compInfo}: Image file exists (${imageBuffer.length} bytes) but could not be processed. Sharp error: ${sharpErr}. The image is a 16-bit PNG which requires conversion.`
+            }],
+            isError: true
+          };
         }
       }
       
