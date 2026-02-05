@@ -3202,7 +3202,7 @@ function addLayerStyle(args) {
         var comp = app.project.item(args.compIndex);
         var layer = comp.layer(args.layerIndex);
         comp.openInViewer();
-        app.project.activeItem = comp;
+        // Note: app.project.activeItem is read-only, openInViewer() sets it
         layer.selected = true;
         
         var menuNames = {
