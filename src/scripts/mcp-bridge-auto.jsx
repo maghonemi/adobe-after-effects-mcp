@@ -1928,6 +1928,54 @@ function applyMaskAnimation(args) {
 // NEW FUNCTIONS - Render
 // ============================================================================
 
+function listOutputModuleTemplates(args) {
+    try {
+        var comp = null;
+        // Find any comp to use temporarily
+        for (var i = 1; i <= app.project.numItems; i++) {
+            if (app.project.item(i) instanceof CompItem) {
+                comp = app.project.item(i);
+                break;
+            }
+        }
+        if (!comp) {
+            return JSON.stringify({
+                status: "error",
+                message: "No compositions in project to query templates"
+            }, null, 2);
+        }
+
+        // Add temp render item to get templates
+        var tempItem = app.project.renderQueue.items.add(comp);
+        var outputModule = tempItem.outputModules[1];
+
+        // Get output module templates
+        var templates = outputModule.templates;
+        var templateList = [];
+        for (var t = 0; t < templates.length; t++) {
+            templateList.push(templates[t]);
+        }
+
+        // Get render settings templates
+        var renderTemplates = tempItem.templates;
+        var renderTemplateList = [];
+        for (var r = 0; r < renderTemplates.length; r++) {
+            renderTemplateList.push(renderTemplates[r]);
+        }
+
+        // Remove the temp item
+        tempItem.remove();
+
+        return JSON.stringify({
+            status: "success",
+            outputModuleTemplates: templateList,
+            renderSettingsTemplates: renderTemplateList
+        }, null, 2);
+    } catch (e) {
+        return JSON.stringify({ status: "error", message: e.toString() }, null, 2);
+    }
+}
+
 function addToRenderQueue(args) {
     try {
         var comp = app.project.item(args.compIndex);
@@ -4726,6 +4774,9 @@ function executeCommand(command, args) {
                 result = applyMaskAnimation(args);
                 break;
             // Render
+            case "listOutputModuleTemplates":
+                result = listOutputModuleTemplates(args);
+                break;
             case "addToRenderQueue":
                 result = addToRenderQueue(args);
                 break;
